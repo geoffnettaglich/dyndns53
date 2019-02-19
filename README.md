@@ -1,3 +1,8 @@
+Inspiration from:
+
+- Upstream code repo (this is a forked) : https://github.com/sTywin/dyndns53
+- Turotial on SAM / AWS lambda : https://github.com/mavi888/sam-test-basic-project
+
 # DynDNS53
 
 DynDNS53 is an implementation for AWS of the dyndns2 protocol used by many DDNS providers such as Dyn and Google Domains. It runs as a AWS Lambda function, via an API Gateway endpoint, and updates records in Route 53 zones. When setup properly, the only service you need to run locally is your favourite DDNS update client. This implementation was tested with `ddclient`.

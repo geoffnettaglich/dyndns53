@@ -9,49 +9,46 @@ logger.setLevel(logging.DEBUG)
 
 import json
 import re
-import sys
+import sys, traceback
 
 import boto3
 
-
-class AuthorizationMissing(Exception):
+class AppErr(Exception):
+	status = 500
+	response = "Error"
+	headers = {}
+class AuthorizationMissing(AppErr):
 	status = 401
-	response = {"WWW-Authenticate":"Basic realm=dyndns53"}
-class HostnameException(Exception):
+	headers = {"WWW-Authenticate":"Basic realm=dyndns53"}
+class HostnameException(AppErr):
 	status = 404
 	response = "nohost"
-class AuthorizationException(Exception):
+class AuthorizationException(AppErr):
 	status = 403
 	response = "badauth"
-class FQDNException(Exception):
+class FQDNException(AppErr):
 	status = 400
 	response = "notfqdn"
-class BadAgentException(Exception):
+class BadAgentException(AppErr):
 	status = 400
 	response = "badagent"
-class AbuseException(Exception):
+class AbuseException(AppErr):
 	status = 403
 	response = "abuse"
 
-
-conf = {
-	'<username>:<password>': {
-		'hosts': {
-			'<host.example.com.>': {
-				'aws_region': 'us-west-2',
-				'zone_id': '<MY_ZONE_ID>',
-				'record': {
-					'ttl': 60,
-					'type': 'A',
-				},
-				'last_update': None,
-			},
-		},
-	},
-}
-
+client53 = boto3.client('route53','ca-central-1')
 
 re_ip = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")
+
+creds = {
+  'test': 'test'
+}
+
+conf = {}
+
+with open("config.json", "r") as config_file:
+	conf = json.load(config_file)
+
 def _parse_ip(ipstring):
 	m = re_ip.match(ipstring)
 	if bool(m) and all(map(lambda n: 0 <= int(n) <= 255, m.groups())):
@@ -60,7 +57,6 @@ def _parse_ip(ipstring):
 		raise BadAgentException("Invalid IP string: {}".format(ipstring))
 
 
-client53 = boto3.client('route53','us-west-2')
 def r53_upsert(host, hostconf, ip):
 
 	record_type = hostconf['record']['type']
@@ -73,12 +69,18 @@ def r53_upsert(host, hostconf, ip):
 	)
 
 	old_ip = None
+	logger.info("Host={} for Zone:{} ".format(host, hostconf['zone_id']))
 	if not record_set:
 		msg = "No existing record found for host {} in zone {}"
 		logger.info(msg.format(host, hostconf['zone_id']))
 	else:
-		record = record_set['ResourceRecordSets'][0]
-		if record['Name'] == host and record['Type'] == record_type:
+		logger.info(record_set)
+		record = None
+
+		if record_set and record_set['ResourceRecordSets'] and len(record_set['ResourceRecordSets']) > 0:
+			record = record_set['ResourceRecordSets'][0]
+
+		if record and record['Name'] == host and record['Type'] == record_type:
 			if len(record['ResourceRecords']) == 1:
 				for subrecord in record['ResourceRecords']:
 					old_ip = subrecord['Value']
@@ -116,17 +118,16 @@ def r53_upsert(host, hostconf, ip):
 		}
 	)
 
-	return True
+	return return_status
 
 
 def _handler(event, context):
-
-	if 'header' not in event:
+	if 'headers' not in event or event['headers'] is None:
 		msg = "Headers not populated properly. Check API Gateway configuration."
-		raise KeyError(msg)
+		raise AuthorizationMissing(msg)
 
 	try:
-		auth_header = event['header']['Authorization']
+		auth_header = event['headers']['Authorization']
 	except KeyError as e:
 		raise AuthorizationMissing("Authorization required but not provided.")
 
@@ -135,47 +136,93 @@ def _handler(event, context):
 			auth_header[len('Basic '):].decode('base64').split(':') )
 	except Exception as e:
 		msg = "Malformed basicauth string: {}"
-		raise BadAgentException(msg.format(event['header']['Authorization']))
+		raise BadAgentException(msg.format(event['headers']['Authorization']))
 
-	auth_string = ':'.join([auth_user,auth_pass])
-	if auth_string not in conf:
+	if auth_user not in creds and auth_user not in conf:
 		raise AuthorizationException("Bad username/password.")
 
+	if creds[auth_user] != auth_pass:
+		raise AuthorizationException("Bad username/password.")
+
+	query = {}
+	if 'queryStringParameters' in event:
+		query = event['queryStringParameters']
+	elif 'querystring' in event:
+		query = event['querystring']
+
 	try:
+		logger.debug(query)
+		hostname = query['hostname']
 		hosts = set( h if h.endswith('.') else h+'.' for h in
-				event['querystring']['hostname'].split(',') )
+				hostname.split(',') )
+		logger.debug("Host supplied: {}".format(hosts))
 	except KeyError as e:
 		raise BadAgentException("Hostname(s) required but not provided.")
 
-	if any(host not in conf[auth_string]['hosts'] for host in hosts):
+	if any(host not in conf[auth_user]['hosts'] for host in hosts):
 		raise HostnameException()
 
 	try:
-		ip = _parse_ip(event['querystring']['myip'])
+		ip = _parse_ip(query['myip'])
 		logger.debug("User supplied IP address: {}".format(ip))
 	except KeyError as e:
-		ip = _parse_ip(event['context']['source-ip'])
+		ip = _parse_ip(event['requestContext']['identity']['sourceIp'])
 		msg = "User omitted IP address, using best-guess from $context: {}"
-		logger.debug(msg.format(ip))
+		logger.info(msg.format(ip), exc_info=True)
 
-	if any(r53_upsert(host,conf[auth_string]['hosts'][host],ip) for host in hosts):
+	if any(r53_upsert(host,conf[auth_user]['hosts'][host],ip) for host in hosts):
 		return "good {}".format(ip)
 	else:
 		return "nochg {}".format(ip)
 
+def response_proxy(data, ctype="json"):
+	logger.debug(data)
+	response = {}
+	response["isBase64Encoded"] = False
+	response["statusCode"] = data["statusCode"]
+	if "headers" in data:
+		response["headers"] = data["headers"]
+	else:
+		response["headers"] = {}
 
-def lambda_handler(event, context):
+	if "body" in data:
+		if ctype == "json":
+			response["headers"]["Content-Type"] = "teapplicationxt/json"
+			response["body"] = json.dumps(data["body"])
+		else:
+			response["headers"]["Content-Type"] = "text/plain"
+			response["body"] = data["body"]
+	return response
+
+def request_proxy(data):
+	logger.debug(data)
+	request = {}
+	request = data
+	if "body" in data and data["body"]:
+		request["body"]=json.loads(data["body"])
+	return request
+
+def lambda_proxy_handler(event, context):
+	response = {
+		'headers': {},
+		'body': {}
+	}
 
 	try:
-
-		response = _handler(event, context)
-
+		request = request_proxy(event)
+		response["statusCode"]=200
+		response["body"] = _handler(event, context)
 	except Exception as e:
-		try:
-			j = {'status':e.status, 'response':e.response, 'additional':e.message}
-		except AttributeError as f:
-			j = {'status':500, 'response':"911", 'additional':str(e)}
-		finally:
-			raise type(e), type(e)(json.dumps(j)), sys.exc_info()[2]
+		logger.exception("Exception handling request")
+		if isinstance(e, AppError):
+			response["statusCode"] = e.status
+			response["headers"] = e.headers
+			response["body"] e.response
+			response["statusCode"]=500
+		else:
+			response["body"] = "{0}: {1}".format(e.__class__.__name__, e.message)
+	return response_proxy(response, None)
 
+def lambda_handler(event, context):
+	response = _handler(event, context)
 	return { 'status': 200, 'response': response }
