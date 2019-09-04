@@ -1,0 +1,15 @@
+{
+  "path": {},
+  "body-json": {},
+  "querystring": {
+    "hostname": "test.geoffwebb.net",
+    "myip": "192.168.1.10"
+  },
+  "context": {
+    "http-method": "GET",
+    "source-ip": "192.168.1.5"
+  },
+  "headers": {
+    "Authorization": "Basic XXXX"
+  }
+}

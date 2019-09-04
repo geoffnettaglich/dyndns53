@@ -40,12 +40,11 @@ client53 = boto3.client('route53','ca-central-1')
 
 re_ip = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")
 
-creds = {
-  'test': 'test'
-}
+creds = {}
+with open("creds.json", "r") as config_file:
+	creds = json.load(config_file)
 
 conf = {}
-
 with open("config.json", "r") as config_file:
 	conf = json.load(config_file)
 
@@ -55,7 +54,6 @@ def _parse_ip(ipstring):
 		return ipstring
 	else:
 		raise BadAgentException("Invalid IP string: {}".format(ipstring))
-
 
 def r53_upsert(host, hostconf, ip):
 
@@ -120,7 +118,6 @@ def r53_upsert(host, hostconf, ip):
 
 	return return_status
 
-
 def _handler(event, context):
 	if 'headers' not in event or event['headers'] is None:
 		msg = "Headers not populated properly. Check API Gateway configuration."
@@ -160,6 +157,7 @@ def _handler(event, context):
 		raise BadAgentException("Hostname(s) required but not provided.")
 
 	if any(host not in conf[auth_user]['hosts'] for host in hosts):
+		logger.info("Host: {} not found in config lookup(s)".format(conf[auth_user]['hosts']))
 		raise HostnameException()
 
 	try:
@@ -214,12 +212,12 @@ def lambda_proxy_handler(event, context):
 		response["body"] = _handler(event, context)
 	except Exception as e:
 		logger.exception("Exception handling request")
-		if isinstance(e, AppError):
+		if isinstance(e, AppErr):
 			response["statusCode"] = e.status
 			response["headers"] = e.headers
-			response["body"] e.response
-			response["statusCode"]=500
+			response["body"] = e.response
 		else:
+			response["statusCode"] = 500
 			response["body"] = "{0}: {1}".format(e.__class__.__name__, e.message)
 	return response_proxy(response, None)
 
